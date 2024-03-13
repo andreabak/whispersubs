@@ -1,0 +1,4 @@
+pyav
+faster-whisper
+srt
+numpy

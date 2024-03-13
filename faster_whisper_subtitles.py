@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from datetime import timedelta
 from pathlib import Path
 from time import monotonic_ns
@@ -9,15 +10,24 @@ from typing import TYPE_CHECKING, Iterator, Iterable, Sequence
 import av
 import numpy as np
 from faster_whisper.transcribe import WhisperModel, Segment as WhisperSegment
+from faster_whisper.utils import available_models
 import srt
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
+_logger = logging.getLogger(__name__)
+
+
 SAMPLE_RATE: int = 16000
 MAX_TRANSCRIBE_SECONDS: float = 30.0
-WHISPER_MODEL_SIZE: str = "large-v3"
+
+DEFAULT_WHISPER_MODEL_SIZE: str = "large-v3"
+DEFAULT_MODEL_DEVICE: str = "auto"
+DEFAULT_LANGUAGE: str | None = None
+DEFAULT_SPLIT_LINES_LENGTH: int = 50
+DEFAULT_JOIN_GAPS_DURATION: float | None = 3.0
 
 
 def get_audio_chunks(file: Path) -> Iterator[NDArray[np.float32]]:
@@ -42,14 +52,15 @@ def get_audio_chunks(file: Path) -> Iterator[NDArray[np.float32]]:
 def transcribe_segments(
     audio_chunks: Iterable[NDArray[np.float32]],
     *,
-    device: str = "auto",
-    language: str | None = None,
+    model_size: str = DEFAULT_WHISPER_MODEL_SIZE,
+    device: str = DEFAULT_MODEL_DEVICE,
+    language: str | None = DEFAULT_LANGUAGE,
     translate: bool = False,
 ) -> Iterator[WhisperSegment]:
     """
     Transcribe the given audio chunks into text segments.
     """
-    model = WhisperModel(WHISPER_MODEL_SIZE, device=device)
+    model = WhisperModel(model_size, device=device)
     transcribe_kwargs = dict(
         task="transcribe" if not translate else "translate",
         language=language,
@@ -76,7 +87,9 @@ def transcribe_segments(
             transcribe_frames = acc_buffer[:-extra_frames_count]
             acc_buffer = acc_buffer[-extra_frames_count:]
 
-            segments, _ = model.transcribe(transcribe_frames, **transcribe_kwargs, vad_filter=True)
+            segments, transcribe_info = model.transcribe(
+                transcribe_frames, **transcribe_kwargs, vad_filter=True
+            )
             segments = list(segments)
 
             # while mid-transcription, last segment is not considered done, its audio is put back into the buffer
@@ -100,6 +113,17 @@ def transcribe_segments(
                 )
                 acc_buffer = np.concatenate([acc_buffer, transcribe_frames[done_end_offset:]])
 
+            if segments:
+                if transcribe_info.language_probability > 0.5:
+                    language = transcribe_info.language
+                    transcribe_kwargs["language"] = language
+                else:
+                    _logger.warning(
+                        "Failed to detect language from audio "
+                        f"(best guess: {transcribe_info.language},"
+                        f" prob:{transcribe_info.language_probability:.2f})"
+                    )
+
             buffer_offset += done_end_offset
 
             transcribed_seconds = buffer_offset / SAMPLE_RATE
@@ -117,7 +141,7 @@ def transcribe_segments(
 
 def create_subtitles(
     segments: Iterable[WhisperSegment],
-    split_lines_length: int | None = 50,
+    split_lines_length: int | None = DEFAULT_SPLIT_LINES_LENGTH,
 ) -> Iterable[srt.Subtitle]:
     """
     Create a subtitle file from the given segments.
@@ -150,7 +174,7 @@ def create_subtitles(
 
 
 def postprocess_subtitles(
-    subtitles: Sequence[srt.Subtitle], join_gaps_duration: float | None = 3.0
+    subtitles: Sequence[srt.Subtitle], join_gaps_duration: float | None = DEFAULT_JOIN_GAPS_DURATION
 ) -> list[srt.Subtitle]:
     """
     Post-process the given subtitles by joining gaps shorter than the specified duration.
@@ -175,15 +199,21 @@ def postprocess_subtitles(
 def transcribe_to_subtitles(
     file: Path,
     output: Path,
-    device: str = "auto",
-    language: str | None = None,
+    *,
+    model_size: str = DEFAULT_WHISPER_MODEL_SIZE,
+    device: str = DEFAULT_MODEL_DEVICE,
+    language: str | None = DEFAULT_LANGUAGE,
     translate: bool = False,
-    split_lines_length: int | None = 50,
-    join_gaps_duration: float | None = 3.0,
+    split_lines_length: int | None = DEFAULT_SPLIT_LINES_LENGTH,
+    join_gaps_duration: float | None = DEFAULT_JOIN_GAPS_DURATION,
 ) -> None:
     audio_chunks_iter = get_audio_chunks(file)
     segments_iter = transcribe_segments(
-        audio_chunks_iter, device=device, language=language, translate=translate
+        audio_chunks_iter,
+        model_size=model_size,
+        device=device,
+        language=language,
+        translate=translate,
     )
     subtitles = create_subtitles(segments_iter, split_lines_length=split_lines_length)
     subtitles = postprocess_subtitles(list(subtitles), join_gaps_duration=join_gaps_duration)
@@ -197,7 +227,7 @@ def main():
     parser.add_argument(
         "output",
         type=Path,
-        help="Output SRT file. Defaults to input file with .srt extension.",
+        help="Output SRT file. Defaults to input file name with '.<lang>' suffix and '.srt' extension.",
         nargs="?",
     )
     parser.add_argument(
@@ -210,23 +240,29 @@ def main():
         help="Translate the transcribed text to English",
     )
     parser.add_argument(
+        "--model-size",
+        choices=available_models(),
+        default=DEFAULT_WHISPER_MODEL_SIZE,
+        help="Whisper model size to use for transcription",
+    )
+    parser.add_argument(
         "--device",
         choices=["cpu", "cuda", "auto"],
-        default="auto",
+        default=DEFAULT_MODEL_DEVICE,
         help="Device to use for model inference",
     )
     parser.add_argument(
         "--split-long-lines",
         nargs="?",
         type=int,
-        const=50,
+        const=DEFAULT_SPLIT_LINES_LENGTH,
         help="Split long lines into multiple subtitles",
     )
     parser.add_argument(
         "--join-gaps",
         nargs="?",
         type=float,
-        const=3.0,
+        const=DEFAULT_JOIN_GAPS_DURATION,
         help="Join subtitles with gaps shorter than the specified duration",
     )
     args = parser.parse_args()
@@ -237,6 +273,7 @@ def main():
     transcribe_to_subtitles(
         args.input,
         args.output,
+        model_size=args.model_size,
         device=args.device,
         language=args.language,
         translate=args.translate,

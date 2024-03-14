@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import itertools
 import logging
 import os
 import sys
 import warnings
+from contextlib import nullcontext
 from datetime import timedelta
+from itertools import chain
 from pathlib import Path
 from time import monotonic_ns
 from typing import TYPE_CHECKING, Iterator, Iterable, Sequence
@@ -16,6 +17,7 @@ import numpy as np
 from faster_whisper.transcribe import WhisperModel, Segment as WhisperSegment, TranscriptionInfo
 from faster_whisper.utils import available_models
 import srt
+import tqdm
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -52,7 +54,7 @@ DEFAULT_SPLIT_LINES_LENGTH: int = 50
 DEFAULT_JOIN_GAPS_DURATION: float | None = 3.0
 
 
-def get_audio_chunks(file: Path) -> Iterator[NDArray[np.float32]]:
+def extract_audio(file: Path) -> Iterator[tuple[NDArray[np.float32], float]]:
     """
     Generate audio chunks from the given audio/video file.
 
@@ -61,6 +63,8 @@ def get_audio_chunks(file: Path) -> Iterator[NDArray[np.float32]]:
     container = av.open(str(file), "r")
     audio_stream = next(s for s in container.streams if s.type == "audio")
 
+    duration: float = (audio_stream.duration or container.duration) / 1e6
+
     # resampler for 16000hz float32 mono PCM
     resampler = av.AudioResampler(format="flt", layout="mono", rate=SAMPLE_RATE)
 
@@ -68,7 +72,7 @@ def get_audio_chunks(file: Path) -> Iterator[NDArray[np.float32]]:
         for resampled_frame in resampler.resample(frame):
             frame_np = resampled_frame.to_ndarray()
             assert frame_np.shape[0] == 1  # mono
-            yield frame_np[0]
+            yield frame_np[0], duration
 
 
 def transcribe_segments(
@@ -78,6 +82,8 @@ def transcribe_segments(
     device: str = DEFAULT_MODEL_DEVICE,
     language: str | None = DEFAULT_LANGUAGE,
     translate: bool = False,
+    total_duration: float | None = None,
+    progress: bool = False,
 ) -> Iterator[tuple[WhisperSegment, TranscriptionInfo]]:
     """
     Transcribe the given audio chunks into text segments.
@@ -92,74 +98,79 @@ def transcribe_segments(
     # fill the accumulator buffer with up to 30s of audio, then transcribe
     max_transcribe_frames = int(MAX_TRANSCRIBE_SECONDS * SAMPLE_RATE)
     last_chunk: bool = False
-    segments_count = 0
-    start_t: int = monotonic_ns()
-    while True:
-        try:
-            chunk = next(audio_chunks)
-        except StopIteration:
-            last_chunk = True
-        else:
-            acc_buffer = np.concatenate([acc_buffer, chunk])
+    # segments_count = 0
+    # start_t: int = monotonic_ns()
+    pbar_context = tqdm.tqdm(desc="transcribe", unit="s", total=total_duration) if progress else nullcontext()
+    with pbar_context as pbar:
+        while True:
+            try:
+                chunk = next(audio_chunks)
+            except StopIteration:
+                last_chunk = True
+            else:
+                acc_buffer = np.concatenate([acc_buffer, chunk])
 
-        extra_frames_count = max(0, acc_buffer.size - max_transcribe_frames)
-        if last_chunk or extra_frames_count > 0:
-            assert extra_frames_count >= 0
-            assert acc_buffer.size >= extra_frames_count
-            transcribe_frames = acc_buffer[:-extra_frames_count]
-            acc_buffer = acc_buffer[-extra_frames_count:]
+            extra_frames_count = max(0, acc_buffer.size - max_transcribe_frames)
+            if last_chunk or extra_frames_count > 0:
+                assert extra_frames_count >= 0
+                assert acc_buffer.size >= extra_frames_count
+                transcribe_frames = acc_buffer[:-extra_frames_count]
+                acc_buffer = acc_buffer[-extra_frames_count:]
 
-            segments, transcribe_info = model.transcribe(
-                transcribe_frames, **transcribe_kwargs, vad_filter=True
-            )
-            segments = list(segments)
-
-            # while mid-transcription, last segment is not considered done, its audio is put back into the buffer
-            yield_all = last_chunk or len(segments) == 1
-            done_segments = segments if yield_all else segments[:-1]
-            offset_seconds = buffer_offset / SAMPLE_RATE
-            for segment in done_segments:
-                offset_segment = segment._replace(
-                    seek=segment.seek + buffer_offset,
-                    start=segment.start + offset_seconds,
-                    end=segment.end + offset_seconds,
+                segments, transcribe_info = model.transcribe(
+                    transcribe_frames, **transcribe_kwargs, vad_filter=True
                 )
-                yield offset_segment, transcribe_info
-            segments_count += len(done_segments)
+                segments = list(segments)
 
-            done_end_offset: int = transcribe_frames.size
-            if not segments:
-                pass
-            elif not yield_all:
-                done_end_offset = min(
-                    int(done_segments[-1].end * SAMPLE_RATE), transcribe_frames.size
-                )
-                acc_buffer = np.concatenate([acc_buffer, transcribe_frames[done_end_offset:]])
-
-            if segments:
-                if transcribe_info.language_probability > LANGUAGE_PROB_THRESHOLD:
-                    language = transcribe_info.language
-                    transcribe_kwargs["language"] = language
-                else:
-                    _logger.warning(
-                        "Failed to detect language from audio "
-                        f"(best guess: {transcribe_info.language},"
-                        f" prob:{transcribe_info.language_probability:.2f})"
+                # while mid-transcription, last segment is not considered done, its audio is put back into the buffer
+                yield_all = last_chunk or len(segments) == 1
+                done_segments = segments if yield_all else segments[:-1]
+                offset_seconds = buffer_offset / SAMPLE_RATE
+                for segment in done_segments:
+                    offset_segment = segment._replace(
+                        seek=segment.seek + buffer_offset,
+                        start=segment.start + offset_seconds,
+                        end=segment.end + offset_seconds,
                     )
+                    yield offset_segment, transcribe_info
+#                 segments_count += len(done_segments)
 
-            buffer_offset += done_end_offset
+                done_end_offset: int = transcribe_frames.size
+                if not segments:
+                    pass
+                elif not yield_all:
+                    done_end_offset = min(
+                        int(done_segments[-1].end * SAMPLE_RATE), transcribe_frames.size
+                    )
+                    acc_buffer = np.concatenate([acc_buffer, transcribe_frames[done_end_offset:]])
 
-            transcribed_seconds = buffer_offset / SAMPLE_RATE
-            elapsed_time = (monotonic_ns() - start_t) / 1e9
-            realtime_factor = transcribed_seconds / elapsed_time
-            print(
-                f"\rProcessed {transcribed_seconds:.2f} seconds, transcribed {segments_count} segments, {realtime_factor:.1f}x realtime",
-                end="",
-                flush=True,
-            )
+                if segments:
+                    if transcribe_info.language_probability > LANGUAGE_PROB_THRESHOLD:
+                        language = transcribe_info.language
+                        transcribe_kwargs["language"] = language
+                    else:
+                        _logger.warning(
+                            "Failed to detect language from audio "
+                            f"(best guess: {transcribe_info.language},"
+                            f" prob:{transcribe_info.language_probability:.2f})"
+                        )
 
-        if last_chunk:
-            break
+                buffer_offset += done_end_offset
+
+                if pbar is not None:
+                    pbar.update(done_end_offset / SAMPLE_RATE)
+
+                # transcribed_seconds = buffer_offset / SAMPLE_RATE
+                # elapsed_time = (monotonic_ns() - start_t) / 1e9
+                # realtime_factor = transcribed_seconds / elapsed_time
+                # print(
+                #     f"\rProcessed {transcribed_seconds:.2f} seconds, transcribed {segments_count} segments, {realtime_factor:.1f}x realtime",
+                #     end="",
+                #     flush=True,
+                # )
+
+            if last_chunk:
+                break
 
 
 def create_subtitles(
@@ -227,16 +238,23 @@ def transcribe_to_subtitles(
     device: str = DEFAULT_MODEL_DEVICE,
     language: str | None = DEFAULT_LANGUAGE,
     translate: bool = False,
+    progress: bool = False,
     split_lines_length: int | None = DEFAULT_SPLIT_LINES_LENGTH,
     join_gaps_duration: float | None = DEFAULT_JOIN_GAPS_DURATION,
 ) -> None:
-    audio_chunks_iter = get_audio_chunks(input_file)
+    extract_audio_iter = extract_audio(input_file)
+
+    audio_chunk, duration = next(extract_audio_iter)
+    audio_chunks_iter = chain([audio_chunk], (c for c, _ in extract_audio_iter))
+
     transcribe_iter = transcribe_segments(
         audio_chunks_iter,
         model_size=model_size,
         device=device,
         language=language,
         translate=translate,
+        total_duration=duration,
+        progress=progress,
     )
 
     def iterate_segments() -> Iterator[WhisperSegment]:
@@ -313,6 +331,7 @@ def main():
         device=args.device,
         language=args.language,
         translate=args.translate,
+        progress=True,
         split_lines_length=args.split_long_lines,
         join_gaps_duration=args.join_gaps,
     )

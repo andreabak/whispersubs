@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import logging
 import os
 import sys
@@ -12,7 +13,7 @@ from typing import TYPE_CHECKING, Iterator, Iterable, Sequence
 
 import av
 import numpy as np
-from faster_whisper.transcribe import WhisperModel, Segment as WhisperSegment
+from faster_whisper.transcribe import WhisperModel, Segment as WhisperSegment, TranscriptionInfo
 from faster_whisper.utils import available_models
 import srt
 
@@ -42,6 +43,7 @@ _logger = logging.getLogger(__name__)
 
 SAMPLE_RATE: int = 16000
 MAX_TRANSCRIBE_SECONDS: float = 30.0
+LANGUAGE_PROB_THRESHOLD: float = 0.5
 
 DEFAULT_WHISPER_MODEL_SIZE: str = "large-v3"
 DEFAULT_MODEL_DEVICE: str = "auto"
@@ -76,7 +78,7 @@ def transcribe_segments(
     device: str = DEFAULT_MODEL_DEVICE,
     language: str | None = DEFAULT_LANGUAGE,
     translate: bool = False,
-) -> Iterator[WhisperSegment]:
+) -> Iterator[tuple[WhisperSegment, TranscriptionInfo]]:
     """
     Transcribe the given audio chunks into text segments.
     """
@@ -117,11 +119,12 @@ def transcribe_segments(
             done_segments = segments if yield_all else segments[:-1]
             offset_seconds = buffer_offset / SAMPLE_RATE
             for segment in done_segments:
-                yield segment._replace(
+                offset_segment = segment._replace(
                     seek=segment.seek + buffer_offset,
                     start=segment.start + offset_seconds,
                     end=segment.end + offset_seconds,
                 )
+                yield offset_segment, transcribe_info
             segments_count += len(done_segments)
 
             done_end_offset: int = transcribe_frames.size
@@ -134,7 +137,7 @@ def transcribe_segments(
                 acc_buffer = np.concatenate([acc_buffer, transcribe_frames[done_end_offset:]])
 
             if segments:
-                if transcribe_info.language_probability > 0.5:
+                if transcribe_info.language_probability > LANGUAGE_PROB_THRESHOLD:
                     language = transcribe_info.language
                     transcribe_kwargs["language"] = language
                 else:
@@ -217,8 +220,8 @@ def postprocess_subtitles(
 
 
 def transcribe_to_subtitles(
-    file: Path,
-    output: Path,
+    input_file: Path,
+    output_file: Path | None = None,
     *,
     model_size: str = DEFAULT_WHISPER_MODEL_SIZE,
     device: str = DEFAULT_MODEL_DEVICE,
@@ -227,17 +230,33 @@ def transcribe_to_subtitles(
     split_lines_length: int | None = DEFAULT_SPLIT_LINES_LENGTH,
     join_gaps_duration: float | None = DEFAULT_JOIN_GAPS_DURATION,
 ) -> None:
-    audio_chunks_iter = get_audio_chunks(file)
-    segments_iter = transcribe_segments(
+    audio_chunks_iter = get_audio_chunks(input_file)
+    transcribe_iter = transcribe_segments(
         audio_chunks_iter,
         model_size=model_size,
         device=device,
         language=language,
         translate=translate,
     )
-    subtitles = create_subtitles(segments_iter, split_lines_length=split_lines_length)
+
+    def iterate_segments() -> Iterator[WhisperSegment]:
+        nonlocal language
+        for segment, transcription_info in transcribe_iter:
+            if not language and transcription_info.language_probability > LANGUAGE_PROB_THRESHOLD:
+                language = transcription_info.language
+            yield segment
+
+    subtitles = create_subtitles(iterate_segments(), split_lines_length=split_lines_length)
     subtitles = postprocess_subtitles(list(subtitles), join_gaps_duration=join_gaps_duration)
-    with output.open("w", encoding="utf-8") as f:
+
+    if not language:
+        _logger.warning("Failed to detect language from audio")
+
+    if not output_file:
+        suffix = (f".{language}" if language else "") + ".srt"
+        output_file = input_file.with_suffix(suffix)
+
+    with output_file.open("w", encoding="utf-8") as f:
         f.write(srt.compose(subtitles))
 
 
@@ -286,9 +305,6 @@ def main():
         help="Join subtitles with gaps shorter than the specified duration",
     )
     args = parser.parse_args()
-
-    if args.output is None:
-        args.output = args.input.with_suffix(".srt")
 
     transcribe_to_subtitles(
         args.input,

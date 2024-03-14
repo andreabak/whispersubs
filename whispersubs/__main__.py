@@ -144,7 +144,7 @@ def transcribe_segments(
                     )
                     acc_buffer = np.concatenate([acc_buffer, transcribe_frames[done_end_offset:]])
 
-                if segments:
+                if segments and not language:
                     if transcribe_info.language_probability > LANGUAGE_PROB_THRESHOLD:
                         language = transcribe_info.language
                         transcribe_kwargs["language"] = language
@@ -152,7 +152,7 @@ def transcribe_segments(
                         _logger.warning(
                             "Failed to detect language from audio "
                             f"(best guess: {transcribe_info.language},"
-                            f" prob:{transcribe_info.language_probability:.2f})"
+                            f" prob: {transcribe_info.language_probability:.2f})"
                         )
 
                 buffer_offset += done_end_offset
@@ -267,10 +267,11 @@ def transcribe_to_subtitles(
     subtitles = create_subtitles(iterate_segments(), split_lines_length=split_lines_length)
     subtitles = postprocess_subtitles(list(subtitles), join_gaps_duration=join_gaps_duration)
 
-    if not language:
-        _logger.warning("Failed to detect language from audio")
-
     if not output_file:
+        if translate:
+            language = "en"
+        elif not language:
+            _logger.warning("Failed to detect language from audio")
         suffix = (f".{language}" if language else "") + ".srt"
         output_file = input_file.with_suffix(suffix)
 

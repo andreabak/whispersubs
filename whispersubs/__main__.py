@@ -114,8 +114,8 @@ def transcribe_segments(
             if last_chunk or extra_frames_count > 0:
                 assert extra_frames_count >= 0
                 assert acc_buffer.size >= extra_frames_count
-                transcribe_frames = acc_buffer[:-extra_frames_count]
-                acc_buffer = acc_buffer[-extra_frames_count:]
+                transcribe_frames = acc_buffer[:-extra_frames_count or None]
+                acc_buffer = acc_buffer[transcribe_frames.size:]
 
                 segments, transcribe_info = model.transcribe(
                     transcribe_frames, **transcribe_kwargs, vad_filter=True

@@ -1,0 +1,38 @@
+[project]
+name = "whispersubs"
+dynamic = ["version", "dependencies", "optional-dependencies"]
+description = 'Transcribe audio/video files into subtitles'
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "LGPL-3.0" }
+keywords = ["transcription", "subtitles", "audio", "video", "whisper"]
+authors = [
+  { name = "abk16", email = "and.theunnamed@gmail.com" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[project.urls]
+Homepage = "https://github.com/andreabak/whispersubs"
+Documentation = "https://github.com/andreabak/whispersubs#readme"
+Issues = "https://github.com/andreabak/whispersubs/issues"
+Source = "https://github.com/andreabak/whispersubs"
+
+[build-system]
+requires = ["hatchling", "hatch-requirements-txt"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata.hooks.requirements_txt]
+files = ["requirements.txt"]
+
+[tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
+dev = ["requirements-dev.txt"]

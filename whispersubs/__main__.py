@@ -275,11 +275,14 @@ def transcribe_to_subtitles(
         suffix = (f".{language}" if language else "") + ".srt"
         output_file = input_file.with_suffix(suffix)
 
+    _logger.info(f"Writing subtitles to {output_file}")
     with output_file.open("w", encoding="utf-8") as f:
         f.write(srt.compose(subtitles))
 
 
 def main():
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger("faster_whisper").setLevel(logging.WARNING)  # spammy logs
     parser = argparse.ArgumentParser(description="Transcribe audio/video files into subtitles")
     parser.add_argument("input", type=Path, help="Input audio/video file")
     parser.add_argument(

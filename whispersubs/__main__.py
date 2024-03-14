@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import sys
+import warnings
 from datetime import timedelta
 from pathlib import Path
 from time import monotonic_ns
@@ -15,6 +18,23 @@ import srt
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+
+try:
+    import nvidia.cublas.lib
+    import nvidia.cudnn.lib
+except ImportError:
+    warnings.warn("NVIDIA CUDA libraries not found, inference will run on CPU only.")
+else:
+    _cublas_libs = os.path.dirname(nvidia.cublas.lib.__file__)
+    _cudnn_libs = os.path.dirname(nvidia.cudnn.lib.__file__)
+    _ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
+    if _cudnn_libs not in _ld_library_path or _cublas_libs not in _ld_library_path:
+        os.environ["LD_LIBRARY_PATH"] = ":".join(
+            [_cublas_libs, _cudnn_libs, *_ld_library_path.split(":")]
+        )
+        # restart the script with the updated environment
+        os.execve(sys.executable, [sys.executable] + sys.argv, os.environ)
 
 
 _logger = logging.getLogger(__name__)

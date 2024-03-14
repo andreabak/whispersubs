@@ -35,4 +35,5 @@ build-backend = "hatchling.build"
 files = ["requirements.txt"]
 
 [tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
+cuda = ["requirements-cuda.txt"]
 dev = ["requirements-dev.txt"]

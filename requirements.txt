@@ -2,4 +2,5 @@ pyav
 faster-whisper
 srt
 numpy
-tqdm
+blessed
+enlighten

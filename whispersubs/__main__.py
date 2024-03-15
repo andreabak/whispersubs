@@ -5,19 +5,20 @@ import logging
 import os
 import sys
 import warnings
-from contextlib import nullcontext
+import contextlib
 from datetime import timedelta
 from itertools import chain
 from pathlib import Path
 from time import monotonic_ns
-from typing import TYPE_CHECKING, Iterator, Iterable, Sequence
+from typing import TYPE_CHECKING, Iterator, Iterable, Sequence, ContextManager
 
 import av
 import numpy as np
 from faster_whisper.transcribe import WhisperModel, Segment as WhisperSegment, TranscriptionInfo
 from faster_whisper.utils import available_models
 import srt
-import tqdm
+import blessed
+import enlighten
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -42,16 +43,18 @@ else:
 
 _logger = logging.getLogger(__name__)
 
+term = blessed.Terminal()
+
 
 SAMPLE_RATE: int = 16000
 MAX_TRANSCRIBE_SECONDS: float = 30.0
 LANGUAGE_PROB_THRESHOLD: float = 0.5
 
-DEFAULT_WHISPER_MODEL_SIZE: str = "large-v3"
+DEFAULT_WHISPER_MODEL_SIZE: str = "medium"
 DEFAULT_MODEL_DEVICE: str = "auto"
 DEFAULT_LANGUAGE: str | None = None
 DEFAULT_SPLIT_LINES_LENGTH: int = 50
-DEFAULT_JOIN_GAPS_DURATION: float | None = 3.0
+DEFAULT_JOIN_GAPS_DURATION: float | None = 1.5
 
 
 def extract_audio(file: Path) -> Iterator[tuple[NDArray[np.float32], float]]:
@@ -60,6 +63,7 @@ def extract_audio(file: Path) -> Iterator[tuple[NDArray[np.float32], float]]:
 
     If multiple audio streams are present, the first one is used.
     """
+    _logger.info(f"Opening input file '{file}'")
     container = av.open(str(file), "r")
     audio_stream = next(s for s in container.streams if s.type == "audio")
 
@@ -88,6 +92,7 @@ def transcribe_segments(
     """
     Transcribe the given audio chunks into text segments.
     """
+    _logger.debug(f"Loading Whisper model '{model_size}' [device={device!r}]")
     model = WhisperModel(model_size, device=device)
     transcribe_kwargs = dict(
         task="transcribe" if not translate else "translate",
@@ -95,13 +100,41 @@ def transcribe_segments(
     )
     acc_buffer: NDArray[np.float32] = np.empty(0, dtype=np.float32)
     buffer_offset: int = 0
-    # fill the accumulator buffer with up to 30s of audio, then transcribe
     max_transcribe_frames = int(MAX_TRANSCRIBE_SECONDS * SAMPLE_RATE)
-    last_chunk: bool = False
-    # segments_count = 0
-    # start_t: int = monotonic_ns()
-    pbar_context = tqdm.tqdm(desc="transcribe", unit="s", total=total_duration) if progress else nullcontext()
+
+    pbar_context: ContextManager
+    if progress:
+
+        @contextlib.contextmanager
+        def pbar_cm():
+            manager = enlighten.get_manager(set_scroll=False)
+            counter = manager.counter(
+                total=total_duration,
+                unit="s",
+                desc="transcribing",
+                rtf=0.0,
+                bar_format=(
+                    "{desc}{desc_pad}{percentage:3.0f}%|{bar}| {count:{len_total}.2f}/{total:.2f}"
+                    "{unit}{unit_pad}[{elapsed}<{eta}, {rtf:.1f}x realtime]"
+                ),
+                counter_format=(
+                    "{desc}{desc_pad}{count:.2f}{unit}{unit_pad}"
+                    "[{elapsed}, {rtf:.1f}x realtime]{fill}"
+                ),
+            )
+            with manager, counter:
+                counter.update(0, force=True)
+                yield counter
+
+        pbar_context = pbar_cm()
+    else:
+        pbar_context = contextlib.nullcontext()
+
+    _logger.log(logging.DEBUG if progress else logging.INFO, "Transcribing audio stream")
+    pbar: enlighten.Counter | None
     with pbar_context as pbar:
+        last_chunk: bool = False
+        start_t: int = monotonic_ns()
         while True:
             try:
                 chunk = next(audio_chunks)
@@ -110,12 +143,13 @@ def transcribe_segments(
             else:
                 acc_buffer = np.concatenate([acc_buffer, chunk])
 
+            # fill the accumulator buffer with up to 30s of audio, then transcribe
             extra_frames_count = max(0, acc_buffer.size - max_transcribe_frames)
             if last_chunk or extra_frames_count > 0:
                 assert extra_frames_count >= 0
                 assert acc_buffer.size >= extra_frames_count
-                transcribe_frames = acc_buffer[:-extra_frames_count or None]
-                acc_buffer = acc_buffer[transcribe_frames.size:]
+                transcribe_frames = acc_buffer[: -extra_frames_count or None]
+                acc_buffer = acc_buffer[transcribe_frames.size :]
 
                 segments, transcribe_info = model.transcribe(
                     transcribe_frames, **transcribe_kwargs, vad_filter=True
@@ -133,7 +167,6 @@ def transcribe_segments(
                         end=segment.end + offset_seconds,
                     )
                     yield offset_segment, transcribe_info
-#                 segments_count += len(done_segments)
 
                 done_end_offset: int = transcribe_frames.size
                 if not segments:
@@ -157,17 +190,12 @@ def transcribe_segments(
 
                 buffer_offset += done_end_offset
 
-                if pbar is not None:
-                    pbar.update(done_end_offset / SAMPLE_RATE)
+                transcribed_seconds = buffer_offset / SAMPLE_RATE
+                elapsed_time = (monotonic_ns() - start_t) / 1e9
+                realtime_factor = transcribed_seconds / elapsed_time
 
-                # transcribed_seconds = buffer_offset / SAMPLE_RATE
-                # elapsed_time = (monotonic_ns() - start_t) / 1e9
-                # realtime_factor = transcribed_seconds / elapsed_time
-                # print(
-                #     f"\rProcessed {transcribed_seconds:.2f} seconds, transcribed {segments_count} segments, {realtime_factor:.1f}x realtime",
-                #     end="",
-                #     flush=True,
-                # )
+                if pbar is not None:
+                    pbar.update(done_end_offset / SAMPLE_RATE, rtf=realtime_factor)
 
             if last_chunk:
                 break
@@ -180,8 +208,9 @@ def create_subtitles(
     """
     Create a subtitle file from the given segments.
     """
+    segments_count = 0
     index = 0
-    for segment in segments:
+    for segments_count, segment in enumerate(segments):
         segment_start = segment.start
         segment_end = segment.end
         segment_duration = segment_end - segment_start
@@ -206,6 +235,8 @@ def create_subtitles(
             )
             index += 1
 
+    _logger.debug(f"Generated {index} subtitles from {segments_count + 1} transcribed segments")
+
 
 def postprocess_subtitles(
     subtitles: Sequence[srt.Subtitle], join_gaps_duration: float | None = DEFAULT_JOIN_GAPS_DURATION
@@ -213,6 +244,8 @@ def postprocess_subtitles(
     """
     Post-process the given subtitles by joining gaps shorter than the specified duration.
     """
+    _logger.debug("Post-processing generated subtitles")
+
     if join_gaps_duration is None:
         return list(subtitles)
 
@@ -275,21 +308,54 @@ def transcribe_to_subtitles(
         suffix = (f".{language}" if language else "") + ".srt"
         output_file = input_file.with_suffix(suffix)
 
-    _logger.info(f"Writing subtitles to {output_file}")
+    _logger.info(f"Writing subtitles to '{output_file}'")
     with output_file.open("w", encoding="utf-8") as f:
         f.write(srt.compose(subtitles))
 
 
+class LogFormatter(logging.Formatter):
+    """
+    Custom formatter that adds colors using blessed and uses relative timestamps.
+    """
+
+    COLOR_MAP = {
+        logging.DEBUG: "blue",
+        logging.INFO: "green",
+        logging.WARNING: "yellow",
+        logging.ERROR: "red",
+        logging.CRITICAL: "bold_red",
+    }
+    LEVEL_TAG_MAP = {
+        logging.DEBUG: "[D]",
+        logging.INFO: "[I]",
+        logging.WARNING: "[W]",
+        logging.ERROR: "[E]",
+        logging.CRITICAL: "[C]",
+    }
+    FORMAT = "%(reltime)s %(color)s%(leveltag)s%(color_reset)s%(condname)s %(message)s"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(fmt=self.FORMAT, *args, **kwargs)
+
+    def format(self, record):
+        record.condname = f" ({record.name})" if record.name != "__main__" else ""
+        record.leveltag = self.LEVEL_TAG_MAP.get(record.levelno, "[?]")
+        record.color = getattr(term, self.COLOR_MAP.get(record.levelno, "white"))
+        record.color_reset = term.normal
+        record.reltime = f"{term.indigo}{record.relativeCreated / 1000:5.1f}s{term.normal}"
+        return super().format(record)
+
+
 def main():
     logging.basicConfig(level=logging.INFO)
-    logging.getLogger("faster_whisper").setLevel(logging.WARNING)  # spammy logs
+
     parser = argparse.ArgumentParser(description="Transcribe audio/video files into subtitles")
     parser.add_argument("input", type=Path, help="Input audio/video file")
     parser.add_argument(
         "output",
         type=Path,
-        help="Output SRT file. Defaults to input file name with '.<lang>' suffix and '.srt' extension.",
         nargs="?",
+        help="Output SRT file. Defaults to input file name with '.<lang>' suffix and '.srt' extension.",
     )
     parser.add_argument(
         "--language",
@@ -326,7 +392,33 @@ def main():
         const=DEFAULT_JOIN_GAPS_DURATION,
         help="Join subtitles with gaps shorter than the specified duration",
     )
+    parser.add_argument(
+        "--log-level",
+        choices=["debug", "info", "warning", "error", "critical"],
+        default="info",
+        help="Set the logging level",
+    )
+    parser.add_argument(
+        "--log-whisper",
+        action="store_true",
+        help="Show logs from the faster-whisper library",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable the progress bar",
+    )
     args = parser.parse_args()
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(args.log_level.upper())
+    # get stream handler and set formatter
+    stream_handler = next(h for h in root_logger.handlers if isinstance(h, logging.StreamHandler))
+    stream_handler.setFormatter(LogFormatter())
+
+    if not args.log_whisper:
+        logging.getLogger("urllib3.connectionpool").setLevel(logging.INFO)  # spammy logs
+        logging.getLogger("faster_whisper").setLevel(logging.WARNING)  # spammy logs
 
     transcribe_to_subtitles(
         args.input,
@@ -335,7 +427,7 @@ def main():
         device=args.device,
         language=args.language,
         translate=args.translate,
-        progress=True,
+        progress=not args.no_progress,
         split_lines_length=args.split_long_lines,
         join_gaps_duration=args.join_gaps,
     )

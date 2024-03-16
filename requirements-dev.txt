@@ -1,2 +1,2 @@
-pre-commit
 hatch
+pre-commit

@@ -1,6 +1,6 @@
-pyav
-faster-whisper
-srt
-numpy
 blessed
 enlighten
+faster-whisper
+numpy
+pyav
+srt

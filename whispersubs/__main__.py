@@ -1,24 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import os
 import sys
 import warnings
-import contextlib
 from datetime import timedelta
 from itertools import chain
 from pathlib import Path
 from time import monotonic_ns
-from typing import TYPE_CHECKING, Iterator, Iterable, Sequence, ContextManager
+from typing import TYPE_CHECKING, ContextManager, Iterable, Iterator, Sequence
 
 import av
-import numpy as np
-from faster_whisper.transcribe import WhisperModel, Segment as WhisperSegment, TranscriptionInfo
-from faster_whisper.utils import available_models
-import srt
 import blessed
 import enlighten
+import numpy as np
+import srt
+from faster_whisper.transcribe import Segment as WhisperSegment, TranscriptionInfo, WhisperModel
+from faster_whisper.utils import available_models
+
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -34,9 +35,11 @@ else:
     _cudnn_libs = os.path.dirname(nvidia.cudnn.lib.__file__)
     _ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
     if _cudnn_libs not in _ld_library_path or _cublas_libs not in _ld_library_path:
-        os.environ["LD_LIBRARY_PATH"] = ":".join(
-            [_cublas_libs, _cudnn_libs, *_ld_library_path.split(":")]
-        )
+        os.environ["LD_LIBRARY_PATH"] = ":".join([
+            _cublas_libs,
+            _cudnn_libs,
+            *_ld_library_path.split(":"),
+        ])
         # restart the script with the updated environment
         os.execve(sys.executable, [sys.executable] + sys.argv, os.environ)
 

@@ -21,8 +21,18 @@ For faster results, it is recommended to use a GPU with CUDA support.
 Install the latest version from the repository:
 ```shell
 pip install 'git+https://github.com/andreabak/whispersubs.git'
-# or with CUDA libraries for GPU acceleration
+```
+Or with CUDA libraries for GPU acceleration:
+```shell
 pip install 'whispersubs[cuda] @ git+https://github.com/andreabak/whispersubs.git'
+```
+Or using pipx to install globally in an isolated environment:
+```shell
+pipx install 'git+https://github.com/andreabak/whispersubs.git'
+```
+Or with pipx and CUDA libraries for GPU acceleration:
+```shell
+pipx install 'whispersubs[cuda] @ git+https://github.com/andreabak/whispersubs.git'
 ```
 
 ## Usage

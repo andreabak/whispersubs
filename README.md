@@ -18,22 +18,20 @@ Prerequisites:
 
 For faster results, it is recommended to use a GPU with CUDA support.
 
+Install the latest version from the repository:
 ```shell
-# Clone the repo and cd into it
-git clone https://github.com/andreabak/whispersubs.git
-cd whispersubs
-
-# Install the dependencies
-pip install -r requirements.txt
+pip install 'git+https://github.com/andreabak/whispersubs.git'
+# or with CUDA libraries for GPU acceleration
+pip install 'whispersubs[cuda] @ git+https://github.com/andreabak/whispersubs.git'
 ```
 
 ## Usage
 WhisperSubs can be used from the command line. The basic usage requires an input file, which will be the source for the transcription. The output will be a subtitle file in the SRT format in the same directory as the input file. The language will be automatically detected.
 ```shell
-python -m whispersubs <input_file>
+whispersubs <input_file>
 ```
 
 For a full list of options, run:
 ```shell
-python -m whispersubs --help
+whispersubs --help
 ```

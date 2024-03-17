@@ -27,8 +27,11 @@ Documentation = "https://github.com/andreabak/whispersubs#readme"
 Issues = "https://github.com/andreabak/whispersubs/issues"
 Source = "https://github.com/andreabak/whispersubs"
 
+[project.scripts]
+whispersubs = "whispersubs.__main__:main"
+
 [build-system]
-requires = ["hatchling", "hatch-requirements-txt"]
+requires = ["hatchling", "hatch-requirements-txt", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [tool.hatch.metadata.hooks.requirements_txt]
@@ -37,6 +40,17 @@ files = ["requirements.txt"]
 [tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
 cuda = ["requirements-cuda.txt"]
 dev = ["requirements-dev.txt"]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "whispersubs/_version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "whispersubs",
+]
 
 [tool.ruff]
 fix = true

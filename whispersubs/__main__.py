@@ -44,7 +44,7 @@ else:
         os.execve(sys.executable, [sys.executable, *sys.argv], os.environ)  # noqa: S606
 
 
-_logger = logging.getLogger(__name__)
+_logger = logging.getLogger("whispersubs")
 
 term = blessed.Terminal()
 
@@ -355,7 +355,9 @@ class LogFormatter(logging.Formatter):
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
-    parser = argparse.ArgumentParser(description="Transcribe audio/video files into subtitles")
+    parser = argparse.ArgumentParser(
+        prog="whispersubs", description="Transcribe audio/video files into subtitles"
+    )
     parser.add_argument("input", type=Path, help="Input audio/video file")
     parser.add_argument(
         "output",
